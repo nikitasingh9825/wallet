@@ -1,6 +1,7 @@
 from decimal import Decimal
-from fastapi import FastAPI, Depends, HTTPException
+from fastapi import FastAPI, Depends, HTTPException, Header
 from pydantic import BaseModel, Field
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from database import engine, Base, get_db
@@ -65,9 +66,23 @@ def withdraw(account_id: int, data: Amount, db: Session = Depends(get_db)):
 
 
 @app.post("/transfer")
-def transfer(data: Transfer, db: Session = Depends(get_db)):
+def transfer(
+    data: Transfer,
+    idempotency_key: str = Header(...),
+    db: Session = Depends(get_db),
+):
     if data.from_id == data.to_id:
         raise HTTPException(status_code=400, detail="Cannot transfer to the same account")
+
+    # Record the key first. A duplicate key fails here.
+    record = models.IdempotencyKey(key=idempotency_key, response=None)
+    db.add(record)
+    try:
+        db.flush()
+    except IntegrityError:
+        db.rollback()
+        saved = db.get(models.IdempotencyKey, idempotency_key)
+        return saved.response
 
     first_id, second_id = sorted([data.from_id, data.to_id])
     first = get_account_or_404(db, first_id, lock=True)
@@ -80,5 +95,11 @@ def transfer(data: Transfer, db: Session = Depends(get_db)):
         raise HTTPException(status_code=400, detail="Insufficient funds")
     sender.balance = sender.balance - data.amount
     receiver.balance = receiver.balance + data.amount
+
+    result = {
+        "from_balance": str(sender.balance),
+        "to_balance": str(receiver.balance),
+    }
+    record.response = result
     db.commit()
-    return {"from_balance": sender.balance, "to_balance": receiver.balance}
+    return result
