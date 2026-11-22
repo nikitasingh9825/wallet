@@ -47,10 +47,32 @@ def get_account(account_id: int, db: Session = Depends(get_db)):
     return {"id": account.id, "owner": account.owner, "balance": account.balance}
 
 
+@app.get("/accounts/{account_id}/ledger")
+def get_ledger(account_id: int, db: Session = Depends(get_db)):
+    get_account_or_404(db, account_id)
+    entries = (
+        db.query(models.LedgerEntry)
+        .filter_by(account_id=account_id)
+        .order_by(models.LedgerEntry.id)
+        .all()
+    )
+    return [
+        {
+            "id": e.id,
+            "amount": str(e.amount),
+            "kind": e.kind,
+            "transfer_ref": e.transfer_ref,
+            "created_at": e.created_at.isoformat() if e.created_at else None,
+        }
+        for e in entries
+    ]
+
+
 @app.post("/accounts/{account_id}/deposit")
 def deposit(account_id: int, data: Amount, db: Session = Depends(get_db)):
     account = get_account_or_404(db, account_id, lock=True)
     account.balance = account.balance + data.amount
+    db.add(models.LedgerEntry(account_id=account.id, amount=data.amount, kind="deposit"))
     db.commit()
     return {"id": account.id, "balance": account.balance}
 
@@ -61,6 +83,7 @@ def withdraw(account_id: int, data: Amount, db: Session = Depends(get_db)):
     if account.balance < data.amount:
         raise HTTPException(status_code=400, detail="Insufficient funds")
     account.balance = account.balance - data.amount
+    db.add(models.LedgerEntry(account_id=account.id, amount=-data.amount, kind="withdraw"))
     db.commit()
     return {"id": account.id, "balance": account.balance}
 
@@ -74,7 +97,6 @@ def transfer(
     if data.from_id == data.to_id:
         raise HTTPException(status_code=400, detail="Cannot transfer to the same account")
 
-    # Record the key first. A duplicate key fails here.
     record = models.IdempotencyKey(key=idempotency_key, response=None)
     db.add(record)
     try:
@@ -95,6 +117,15 @@ def transfer(
         raise HTTPException(status_code=400, detail="Insufficient funds")
     sender.balance = sender.balance - data.amount
     receiver.balance = receiver.balance + data.amount
+
+    db.add(models.LedgerEntry(
+        account_id=sender.id, amount=-data.amount,
+        kind="transfer_out", transfer_ref=idempotency_key,
+    ))
+    db.add(models.LedgerEntry(
+        account_id=receiver.id, amount=data.amount,
+        kind="transfer_in", transfer_ref=idempotency_key,
+    ))
 
     result = {
         "from_balance": str(sender.balance),
