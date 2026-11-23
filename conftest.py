@@ -1,3 +1,4 @@
+import os
 import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import create_engine, text
@@ -6,7 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from database import Base, get_db
 from main import app
 
-TEST_DATABASE_URL = "postgresql+psycopg2://walletuser:wallet123@localhost/walletdb_test"
+TEST_DATABASE_URL = os.environ["TEST_DATABASE_URL"]
 test_engine = create_engine(TEST_DATABASE_URL)
 TestSession = sessionmaker(bind=test_engine)
 
